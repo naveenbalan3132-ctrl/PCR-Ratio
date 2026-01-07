@@ -1,110 +1,50 @@
-import streamlit as st
-import time
+from smartapi import SmartConnect
 import pandas as pd
 import pyotp
-from SmartApi import SmartConnect
 
-# ===============================
-# STREAMLIT CONFIG
-# ===============================
-st.set_page_config(page_title="Live PCR Dashboard", layout="wide")
-st.title("📊 LIVE PCR ANALYSIS – Angel One SmartAPI")
-st.caption("🔄 Auto-refresh every 30 seconds")
+# -------- LOGIN -------- #
+API_KEY = "YOUR_API_KEY"
+CLIENT_ID = "YOUR_CLIENT_ID"
+PASSWORD = "YOUR_PASSWORD"
+TOTP_SECRET = "YOUR_TOTP_SECRET"
 
-# ===============================
-# AUTO REFRESH (SAFE)
-# ===============================
-REFRESH_INTERVAL = 30
-if "last_refresh" not in st.session_state:
-    st.session_state.last_refresh = time.time()
+obj = SmartConnect(api_key=API_KEY)
 
-if time.time() - st.session_state.last_refresh > REFRESH_INTERVAL:
-    st.session_state.last_refresh = time.time()
-    st.rerun()
+totp = pyotp.TOTP(TOTP_SECRET).now()
 
-# ===============================
-# CREDENTIALS (MOVE TO SECRETS IN PROD)
-# ===============================
-API_KEY = st.secrets["API_KEY"]
-CLIENT_ID = st.secrets["CLIENT_ID"]
-PASSWORD = st.secrets["PASSWORD"]
-TOTP_SECRET = st.secrets["TOTP_SECRET"]
+session = obj.generateSession(
+    CLIENT_ID,
+    PASSWORD,
+    totp
+)
 
-# ===============================
-# LOGIN (CACHED)
-# ===============================
-@st.cache_resource
-def angel_login():
-    obj = SmartConnect(api_key=API_KEY)
-    totp = pyotp.TOTP(TOTP_SECRET).now()
-    obj.generateSession(CLIENT_ID, PASSWORD, totp)
-    return obj
+# -------- FETCH OPTION CHAIN -------- #
+params = {
+    "exchange": "NFO",
+    "symboltoken": "26000",   # NIFTY token (example)
+    "interval": "5MIN"
+}
 
-smartApi = angel_login()
+option_chain = obj.optionGreek(params)
 
-# ===============================
-# FETCH OPTION CHAIN
-# ===============================
-def fetch_option_chain(symbol, expiry):
-    res = smartApi.getOptionChain({
-        "exchange": "NFO",
-        "symbol": symbol,
-        "expiry": expiry
-    })
-    if not res.get("status"):
-        st.error(res.get("message", "Angel API Error"))
-        return pd.DataFrame()
-    return pd.DataFrame(res["data"])
+df = pd.DataFrame(option_chain['data'])
 
-# ===============================
-# PCR CALCULATIONS
-# ===============================
-def calculate_pcr(df):
-    ce = df[df.optionType == "CE"]
-    pe = df[df.optionType == "PE"]
+# -------- PCR CALCULATION -------- #
+total_put_oi = df[df['optionType'] == 'PE']['openInterest'].sum()
+total_call_oi = df[df['optionType'] == 'CE']['openInterest'].sum()
 
-    pcr = round(pe.openInterest.sum() / ce.openInterest.sum(), 2)
-    pcr_chg = round(
-        pe.changeinOpenInterest.sum() / ce.changeinOpenInterest.sum(), 2
-    )
+pcr = round(total_put_oi / total_call_oi, 2)
 
-    return pcr, pcr_chg
+print("Put OI:", total_put_oi)
+print("Call OI:", total_call_oi)
+print("PCR:", pcr)
 
-# ===============================
-# STRIKE PCR
-# ===============================
-def strike_pcr(df):
-    ce = df[df.optionType == "CE"][["strikePrice", "openInterest", "changeinOpenInterest"]]
-    pe = df[df.optionType == "PE"][["strikePrice", "openInterest", "changeinOpenInterest"]]
-    df = ce.merge(pe, on="strikePrice", suffixes=("_CE", "_PE"))
-    df["PCR"] = (df.openInterest_PE / df.openInterest_CE).round(2)
-    df["PCR_OI_Change"] = (
-        df.changeinOpenInterest_PE / df.changeinOpenInterest_CE
-    ).round(2)
-    return df.sort_values("strikePrice")
+# -------- TRADING SIGNAL -------- #
+if pcr > 1.1:
+    signal = "BUY (Bullish Market)"
+elif pcr < 0.9:
+    signal = "SELL (Bearish Market)"
+else:
+    signal = "NO TRADE (Sideways)"
 
-# ===============================
-# SIGNAL ENGINE
-# ===============================
-def signal(pcr, pcr_chg):
-    if pcr > 1.1 and pcr_chg > 1:
-        return "🟢 STRONG BULLISH"
-    elif pcr < 0.9 and pcr_chg < 1:
-        return "🔴 STRONG BEARISH"
-    else:
-        return "🟡 RANGE / NEUTRAL"
-
-# ===============================
-# UI
-# ===============================
-symbol = st.selectbox("Index", ["NIFTY", "BANKNIFTY", "FINNIFTY"])
-expiry = st.text_input("Expiry (YYYY-MM-DD)", "2026-01-30")
-
-df = fetch_option_chain(symbol, expiry)
-
-if not df.empty:
-    pcr, pcr_chg = calculate_pcr(df)
-    st.metric("📈 PCR", pcr)
-    st.metric("📉 OI PCR", pcr_chg)
-    st.metric("🤖 Signal", signal(pcr, pcr_chg))
-    st.dataframe(strike_pcr(df), use_container_width=True)
+print("Trading Signal:", signal)
