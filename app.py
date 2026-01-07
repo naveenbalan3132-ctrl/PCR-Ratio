@@ -1,15 +1,28 @@
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
+import time
 from smartapi import SmartConnect
 import pyotp
 import pandas as pd
 
 # ===============================
-# AUTO REFRESH EVERY 30 SECONDS
+# STREAMLIT CONFIG
 # ===============================
-st_autorefresh(interval=30 * 1000, key="pcr_refresh")
-
 st.set_page_config(page_title="Live PCR Dashboard", layout="wide")
+st.title("📊 LIVE PCR ANALYSIS – Angel One SmartAPI")
+
+# ===============================
+# AUTO REFRESH (30 seconds)
+# ===============================
+REFRESH_INTERVAL = 30
+
+if "last_refresh" not in st.session_state:
+    st.session_state.last_refresh = time.time()
+
+if time.time() - st.session_state.last_refresh > REFRESH_INTERVAL:
+    st.session_state.last_refresh = time.time()
+    st.experimental_rerun()
+
+st.caption("🔄 Auto-refresh every 30 seconds")
 
 # ===============================
 # ANGEL ONE CREDENTIALS
@@ -20,19 +33,19 @@ PASSWORD = "YOUR_PASSWORD"
 TOTP_SECRET = "YOUR_TOTP_SECRET"
 
 # ===============================
-# LOGIN FUNCTION
+# LOGIN (CACHED)
 # ===============================
 @st.cache_resource
 def angel_login():
-    smartApi = SmartConnect(api_key=API_KEY)
+    obj = SmartConnect(api_key=API_KEY)
     totp = pyotp.TOTP(TOTP_SECRET).now()
-    smartApi.generateSession(CLIENT_ID, PASSWORD, totp)
-    return smartApi
+    obj.generateSession(CLIENT_ID, PASSWORD, totp)
+    return obj
 
 smartApi = angel_login()
 
 # ===============================
-# OPTION CHAIN FETCH
+# FETCH OPTION CHAIN
 # ===============================
 def fetch_option_chain(symbol, expiry):
     params = {
@@ -40,77 +53,74 @@ def fetch_option_chain(symbol, expiry):
         "symbol": symbol,
         "expiry": expiry
     }
-    response = smartApi.getOptionChain(params)
-    if not response["status"]:
-        st.error(response["message"])
+    res = smartApi.getOptionChain(params)
+    if not res["status"]:
+        st.error(res["message"])
         return pd.DataFrame()
-    return pd.DataFrame(response["data"])
+    return pd.DataFrame(res["data"])
 
 # ===============================
-# PCR CALCULATIONS
+# PCR CALCULATION
 # ===============================
 def calculate_pcr(df):
-    call_oi = df[df.optionType == "CE"]["openInterest"].sum()
-    put_oi  = df[df.optionType == "PE"]["openInterest"].sum()
+    ce = df[df.optionType == "CE"]
+    pe = df[df.optionType == "PE"]
 
-    call_oi_chg = df[df.optionType == "CE"]["changeinOpenInterest"].sum()
-    put_oi_chg  = df[df.optionType == "PE"]["changeinOpenInterest"].sum()
+    call_oi = ce.openInterest.sum()
+    put_oi = pe.openInterest.sum()
+
+    call_chg = ce.changeinOpenInterest.sum()
+    put_chg = pe.changeinOpenInterest.sum()
 
     pcr = round(put_oi / call_oi, 2) if call_oi else 0
-    pcr_oi_change = round(put_oi_chg / call_oi_chg, 2) if call_oi_chg else 0
+    pcr_chg = round(put_chg / call_chg, 2) if call_chg else 0
 
-    return pcr, pcr_oi_change
+    return pcr, pcr_chg
 
 # ===============================
-# STRIKE WISE PCR
+# STRIKE-WISE PCR
 # ===============================
 def strike_pcr(df):
     ce = df[df.optionType == "CE"][["strikePrice", "openInterest", "changeinOpenInterest"]]
     pe = df[df.optionType == "PE"][["strikePrice", "openInterest", "changeinOpenInterest"]]
 
     merged = ce.merge(pe, on="strikePrice", suffixes=("_CE", "_PE"))
-    merged["PCR"] = round(merged["openInterest_PE"] / merged["openInterest_CE"], 2)
-    merged["PCR_OI_Change"] = round(
-        merged["changeinOpenInterest_PE"] / merged["changeinOpenInterest_CE"], 2
-    )
+    merged["PCR"] = (merged.openInterest_PE / merged.openInterest_CE).round(2)
+    merged["PCR_OI_Change"] = (
+        merged.changeinOpenInterest_PE / merged.changeinOpenInterest_CE
+    ).round(2)
 
     return merged.sort_values("strikePrice")
 
 # ===============================
 # SIGNAL LOGIC
 # ===============================
-def trading_signal(pcr, pcr_oi):
-    if pcr > 1.1 and pcr_oi > 1:
+def signal_logic(pcr, pcr_chg):
+    if pcr > 1.1 and pcr_chg > 1:
         return "🟢 STRONG BULLISH"
-    elif pcr < 0.9 and pcr_oi < 1:
+    elif pcr < 0.9 and pcr_chg < 1:
         return "🔴 STRONG BEARISH"
     else:
-        return "🟡 NEUTRAL / RANGE"
+        return "🟡 RANGE / NEUTRAL"
 
 # ===============================
-# STREAMLIT UI
+# UI INPUTS
 # ===============================
-st.title("📊 LIVE PCR ANALYSIS – Angel One SmartAPI")
-
 symbol = st.selectbox("Select Index", ["NIFTY", "BANKNIFTY", "FINNIFTY"])
 expiry = st.text_input("Expiry (YYYY-MM-DD)", "2026-01-30")
 
 df = fetch_option_chain(symbol, expiry)
 
 if not df.empty:
-    pcr, pcr_oi = calculate_pcr(df)
-    signal = trading_signal(pcr, pcr_oi)
+    pcr, pcr_chg = calculate_pcr(df)
+    signal = signal_logic(pcr, pcr_chg)
 
-    col1, col2, col3 = st.columns(3)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("📈 PCR (Total OI)", pcr)
+    c2.metric("📉 PCR (OI Change)", pcr_chg)
+    c3.metric("🤖 Signal", signal)
 
-    col1.metric("📈 PCR (Total OI)", pcr)
-    col2.metric("📉 PCR (OI Change)", pcr_oi)
-    col3.metric("🤖 Market Signal", signal)
-
-    st.subheader("📊 Strike-wise PCR (Smart Money View)")
-    strike_df = strike_pcr(df)
-    st.dataframe(strike_df, use_container_width=True)
-
-    st.caption("🔄 Auto-refresh every 30 seconds | Source: Angel One SmartAPI")
+    st.subheader("📊 Strike-wise PCR (Smart Money)")
+    st.dataframe(strike_pcr(df), use_container_width=True)
 else:
     st.warning("Waiting for option chain data...")
