@@ -1,17 +1,18 @@
 import streamlit as st
 import time
-from smartapi import SmartConnect
-import pyotp
 import pandas as pd
+import pyotp
+from SmartApi import SmartConnect   # ✅ CORRECT IMPORT
 
 # ===============================
 # STREAMLIT CONFIG
 # ===============================
 st.set_page_config(page_title="Live PCR Dashboard", layout="wide")
 st.title("📊 LIVE PCR ANALYSIS – Angel One SmartAPI")
+st.caption("🔄 Auto-refresh every 30 seconds")
 
 # ===============================
-# AUTO REFRESH (30 seconds)
+# AUTO REFRESH (NATIVE)
 # ===============================
 REFRESH_INTERVAL = 30
 
@@ -20,12 +21,10 @@ if "last_refresh" not in st.session_state:
 
 if time.time() - st.session_state.last_refresh > REFRESH_INTERVAL:
     st.session_state.last_refresh = time.time()
-    st.experimental_rerun()
-
-st.caption("🔄 Auto-refresh every 30 seconds")
+    st.rerun()
 
 # ===============================
-# ANGEL ONE CREDENTIALS
+# CREDENTIALS (USE SECRETS IN PROD)
 # ===============================
 API_KEY = "YOUR_API_KEY"
 CLIENT_ID = "YOUR_CLIENT_ID"
@@ -54,13 +53,15 @@ def fetch_option_chain(symbol, expiry):
         "expiry": expiry
     }
     res = smartApi.getOptionChain(params)
-    if not res["status"]:
-        st.error(res["message"])
+
+    if not res.get("status"):
+        st.error(res.get("message", "API Error"))
         return pd.DataFrame()
+
     return pd.DataFrame(res["data"])
 
 # ===============================
-# PCR CALCULATION
+# PCR CALCULATIONS
 # ===============================
 def calculate_pcr(df):
     ce = df[df.optionType == "CE"]
@@ -120,7 +121,7 @@ if not df.empty:
     c2.metric("📉 PCR (OI Change)", pcr_chg)
     c3.metric("🤖 Signal", signal)
 
-    st.subheader("📊 Strike-wise PCR (Smart Money)")
+    st.subheader("📊 Strike-wise PCR (Smart Money View)")
     st.dataframe(strike_pcr(df), use_container_width=True)
 else:
     st.warning("Waiting for option chain data...")
